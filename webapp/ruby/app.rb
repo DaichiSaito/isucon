@@ -99,42 +99,35 @@ module Isuconp
       end
 
       def make_posts(results, all_comments: false)
-        post_ids = results.map { |post| post[:id] }
-        all_comments_query = all_comments ? '' : 'LIMIT 3'
+        posts = []
+        results.to_a.each do |post|
+          post[:comment_count] = db.prepare('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?').execute(
+            post[:id]
+          ).first[:count]
 
-        # コメントとユーザー情報を一度に取得
-        comments = db.query('
-    SELECT c.*, u.*
-    FROM comments c
-    JOIN users u ON c.user_id = u.id
-    WHERE c.post_id IN (?)
-    ORDER BY c.created_at DESC
-    #{all_comments_query}
-  ', post_ids.join(','))
+          query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC'
+          unless all_comments
+            query += ' LIMIT 3'
+          end
+          comments = db.prepare(query).execute(
+            post[:id]
+          ).to_a
+          comments.each do |comment|
+            comment[:user] = db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
+              comment[:user_id]
+            ).first
+          end
+          post[:comments] = comments.reverse
 
-        # コメントを投稿IDにマッピング
-        comments_by_post_id = comments.each_with_object({}) do |comment, hash|
-          (hash[comment[:post_id]] ||= []) << comment
+          post[:user] = db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
+            post[:user_id]
+          ).first
+
+          posts.push(post) if post[:user][:del_flg] == 0
+          break if posts.length >= POSTS_PER_PAGE
         end
 
-        # ユーザー情報を一度に取得
-        user_ids = results.map { |post| post[:user_id] }.uniq
-        users = db.query('SELECT * FROM users WHERE id IN (?)', user_ids.join(','))
-        users_by_id = users.each_with_object({}) do |user, hash|
-          hash[user[:id]] = user
-        end
-
-        # 投稿データの組み立て
-        posts = results.map do |post|
-          next if users_by_id[post[:user_id]][:del_flg] != 0
-
-          post[:user] = users_by_id[post[:user_id]]
-          post[:comments] = (comments_by_post_id[post[:id]] || []).reverse
-          post[:comment_count] = post[:comments].size
-          post
-        end.compact
-
-        posts.take(POSTS_PER_PAGE)
+        posts
       end
 
       def image_url(post)
